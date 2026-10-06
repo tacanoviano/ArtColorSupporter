@@ -1,0 +1,22 @@
+{
+    "name": "ArtColorSupporter",
+    "rootNamespace": "ArtColorSupporter",
+    "references": [
+        "NativeGallery.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.yasirkula.nativegallery",
+            "expression": "1.0.0",
+            "define": "NATIVE_GALLERY"
+        }
+    ],
+    "noEngineReferences": false
+}
