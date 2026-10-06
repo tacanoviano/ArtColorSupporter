@@ -18,8 +18,8 @@ namespace ArtColorSupporter
             NotAvailable,
         }
 
-        /// <summary>読み込む画像の最大サイズ（長辺 px）。メモリ節約のため。</summary>
-        const int MaxImageSize = 4096;
+        /// <summary>読み込む画像の最大サイズ（長辺 px）。メモリ節約と減色の速さのため。</summary>
+        const int MaxImageSize = 2048;
 
         public static void PickImage(string title, Action<Result, Texture2D> onDone)
         {

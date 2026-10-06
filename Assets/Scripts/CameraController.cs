@@ -122,6 +122,42 @@ namespace ArtColorSupporter
             return texture;
         }
 
+        /// <summary>
+        /// 映像の中心にある円（半径はカメラ映像のピクセル単位）の中の平均色を求める。
+        /// 回転や反転があっても中心は同じなので、元の映像のまま計算してよい。
+        /// </summary>
+        public bool TryGetCenterAverage(float radius, out Color average)
+        {
+            average = Color.black;
+            if (!IsReady) return false;
+
+            int width = webcam.width, height = webcam.height;
+            int r = Mathf.Clamp(Mathf.RoundToInt(radius), 1, Mathf.Min(width, height) / 2 - 1);
+            int size = r * 2;
+            var pixels = webcam.GetPixels(width / 2 - r, height / 2 - r, size, size);
+            int step = Mathf.Max(1, size / 80); // 多くても 80×80 点程度に間引く
+
+            float sumR = 0, sumG = 0, sumB = 0;
+            int count = 0;
+            for (int y = 0; y < size; y += step)
+            {
+                float dy = y + 0.5f - r;
+                for (int x = 0; x < size; x += step)
+                {
+                    float dx = x + 0.5f - r;
+                    if (dx * dx + dy * dy > r * r) continue;
+                    var c = pixels[y * size + x];
+                    sumR += c.r;
+                    sumG += c.g;
+                    sumB += c.b;
+                    count++;
+                }
+            }
+            if (count == 0) return false;
+            average = new Color(sumR / count, sumG / count, sumB / count, 1f);
+            return true;
+        }
+
         static Color32[] RotateClockwise(Color32[] src, int w, int h, int angle, bool flipVertical,
             out int outW, out int outH)
         {
