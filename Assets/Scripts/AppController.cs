@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using System.IO;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
@@ -7,8 +9,9 @@ using UnityEngine.UI;
 namespace ArtColorSupporter
 {
     /// <summary>
-    /// 最初の画面。UI をコードで組み立て、カメラ・画像選択・言語切り替えを担当する。
-    /// 画面の左半分に撮影/選択した画像を表示し、右半分に操作ボタンと説明を並べる。
+    /// 最初の画面。UI をコードで組み立て、画像表示・減色・色の比較・カメラ・言語切り替えを担当する。
+    /// 左半分: 画像（ピンチで拡大・ドラッグで移動・タップでターゲット色）と色数ボタン。
+    /// 右上: カラーホイール（ターゲット ✕ / カメラ ○）と色のアドバイス。右下: カメラ映像と白い円。
     /// </summary>
     public class AppController : MonoBehaviour
     {
@@ -17,29 +20,66 @@ namespace ArtColorSupporter
         static readonly Color PrimaryColor = new Color32(0x4C, 0x8B, 0xF5, 0xFF);
         static readonly Color SecondaryColor = new Color32(0x3E, 0xB4, 0x89, 0xFF);
         static readonly Color NeutralColor = new Color32(0x55, 0x5A, 0x64, 0xFF);
+        static readonly Color StopColor = new Color32(0xD9, 0x5C, 0x5C, 0xFF);
         static readonly Color ShutterColor = new Color32(0xF2, 0xF2, 0xF2, 0xFF);
         static readonly Color TextColor = new Color32(0xF5, 0xF5, 0xF5, 0xFF);
         static readonly Color SubTextColor = new Color32(0xA0, 0xA6, 0xB0, 0xFF);
         static readonly Color DarkTextColor = new Color32(0x20, 0x20, 0x20, 0xFF);
 
-        // 左半分の画像表示
+        static readonly ColorMode[] Modes =
+            { ColorMode.Full, ColorMode.Colors256, ColorMode.Colors16, ColorMode.Colors8, ColorMode.Mono };
+        static readonly string[] ModeKeys = { "mode_full", "mode_256", "mode_16", "mode_8", "mode_mono" };
+
+        /// <summary>カメラ映像の円の直径（映像エリアの短い辺に対する割合）。</summary>
+        const float CircleRatio = 0.24f;
+        /// <summary>円の画像のうち、平均を取る内側の半径の割合（白い縁を除く）。</summary>
+        const float CircleInnerRatio = 0.88f;
+        /// <summary>ターゲット色はタップした点の周り (2×半径+1) 四方の平均。</summary>
+        const int TargetSampleRadius = 2;
+
+        // 左半分: 画像
         RectTransform imageArea;
         RawImage displayImage;
+        ImageViewer imageViewer;
         GameObject placeholder;
-        Texture2D currentTexture;
+        Image[] modeButtonImages;
 
-        // 右半分の操作パネル
+        Texture2D originalTexture;
+        Color32[] originalPixels;
+        Texture2D reducedTexture;
+        Color32[] displayedPixels;
+        int imageWidth, imageHeight;
+        ColorMode colorMode = ColorMode.Full;
+        int reduceVersion;
+
+        Vector2? targetUv;
+        Color? targetColor;
+        Color? cameraColor;
+
+        // 右上: ホイールと情報
+        RectTransform wheelSection;
+        RectTransform wheelRoot;
+        RectTransform infoColumn;
+        ColorWheel colorWheel;
+        Image targetSwatch, cameraSwatch;
+        LocalizedText adviceText;
+        LocalizedText diffText;
         LocalizedText messageText;
 
-        // カメラ画面
-        GameObject cameraOverlay;
+        // 右下: カメラ
         RectTransform previewArea;
         RawImage previewImage;
+        RectTransform circle;
+        LocalizedText cameraPlaceholder;
         Button shutterButton;
-        LocalizedText cameraMessage;
+        Image cameraButtonImage;
+        LocalizedText cameraButtonLabel;
         CameraController cameraController;
+        Coroutine cameraStartRoutine;
+        bool cameraActive;
+        int sampleFrame;
 
-        bool busy;
+        bool picking;
 
         /// <summary>どのシーンから起動しても画面が作られるようにする。</summary>
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
@@ -58,30 +98,48 @@ namespace ArtColorSupporter
             cameraController = gameObject.AddComponent<CameraController>();
             BuildUI();
             ShowMessage("msg_welcome");
+            UpdateModeButtons();
+            UpdateComparison();
         }
 
         void Update()
         {
-            if (currentTexture != null && displayImage.gameObject.activeSelf)
-                UIFactory.FitTexture(displayImage.rectTransform, imageArea, currentTexture.width, currentTexture.height);
+            // ホイールの右側の残りを情報欄にする
+            infoColumn.offsetMin = new Vector2(wheelRoot.rect.width + 24, infoColumn.offsetMin.y);
 
-            if (cameraOverlay.activeSelf)
+            if (!cameraActive) return;
+
+            float circleSize = Mathf.Min(previewArea.rect.width, previewArea.rect.height) * CircleRatio;
+            circle.sizeDelta = new Vector2(circleSize, circleSize);
+
+            if (cameraController.IsReady)
             {
-                if (cameraController.IsReady)
+                var webcam = cameraController.Texture;
+                previewImage.enabled = true;
+                circle.gameObject.SetActive(true);
+                previewImage.uvRect = cameraController.VerticallyMirrored ? new Rect(0, 1, 1, -1) : new Rect(0, 0, 1, 1);
+                UIFactory.FitTexture(previewImage.rectTransform, previewArea, webcam.width, webcam.height,
+                    cameraController.RotationAngle);
+
+                // 数フレームごとに円の中の平均色を求める
+                if (++sampleFrame % 3 == 0)
                 {
-                    var webcam = cameraController.Texture;
-                    previewImage.enabled = true;
-                    previewImage.uvRect = cameraController.VerticallyMirrored ? new Rect(0, 1, 1, -1) : new Rect(0, 0, 1, 1);
-                    UIFactory.FitTexture(previewImage.rectTransform, previewArea, webcam.width, webcam.height,
-                        cameraController.RotationAngle);
+                    float scale = previewImage.rectTransform.sizeDelta.x / webcam.width;
+                    float radius = circleSize / 2f * CircleInnerRatio / Mathf.Max(scale, 0.0001f);
+                    if (cameraController.TryGetCenterAverage(radius, out var average))
+                    {
+                        // ちらつかないように少しずつ追従させる
+                        cameraColor = cameraColor.HasValue ? Color.Lerp(cameraColor.Value, average, 0.35f) : average;
+                        UpdateComparison();
+                    }
                 }
-                shutterButton.interactable = cameraController.IsReady;
+            }
+            shutterButton.interactable = cameraController.IsReady;
 
 #if ENABLE_LEGACY_INPUT_MANAGER
-                // Android の戻るボタンでカメラを閉じる
-                if (Input.GetKeyDown(KeyCode.Escape)) CloseCamera();
+            // Android の戻るボタンでカメラを止める
+            if (Input.GetKeyDown(KeyCode.Escape)) StopCamera();
 #endif
-            }
         }
 
         static void ApplyLandscapeOrientation()
@@ -93,40 +151,70 @@ namespace ArtColorSupporter
             Screen.orientation = ScreenOrientation.AutoRotation;
         }
 
-        // ───────────────────────── ボタン操作 ─────────────────────────
+        // ───────────────────────── カメラ ─────────────────────────
 
         void OnCameraButton()
         {
-            if (busy) return;
-            busy = true;
-            cameraOverlay.SetActive(true);
+            if (cameraActive)
+            {
+                StopCamera();
+                ShowMessage("msg_camera_stopped");
+                return;
+            }
+
+            cameraActive = true;
+            sampleFrame = 0;
             previewImage.enabled = false;
-            cameraMessage.SetKey("msg_camera_starting");
-            StartCoroutine(cameraController.StartCamera(OnCameraStarted));
+            cameraPlaceholder.SetKey("msg_camera_starting");
+            cameraPlaceholder.gameObject.SetActive(true);
+            shutterButton.gameObject.SetActive(true);
+            shutterButton.interactable = false;
+            cameraButtonLabel.SetKey("btn_camera_stop");
+            cameraButtonImage.color = StopColor;
+            cameraStartRoutine = StartCoroutine(cameraController.StartCamera(OnCameraStarted));
         }
 
         void OnCameraStarted(CameraController.StartResult result)
         {
-            busy = false;
+            cameraStartRoutine = null;
             switch (result)
             {
                 case CameraController.StartResult.Started:
                     previewImage.texture = cameraController.Texture;
-                    cameraMessage.SetKey("msg_camera_hint");
+                    cameraPlaceholder.gameObject.SetActive(false);
+                    ShowMessage("msg_camera_hint");
                     break;
                 case CameraController.StartResult.PermissionDenied:
-                    CloseCamera();
+                    StopCamera();
                     ShowMessage("msg_camera_denied");
                     break;
                 case CameraController.StartResult.NoCamera:
-                    CloseCamera();
+                    StopCamera();
                     ShowMessage("msg_camera_no_device");
                     break;
                 default:
-                    CloseCamera();
+                    StopCamera();
                     ShowMessage("msg_camera_failed");
                     break;
             }
+        }
+
+        void StopCamera()
+        {
+            if (cameraStartRoutine != null) StopCoroutine(cameraStartRoutine);
+            cameraStartRoutine = null;
+            cameraActive = false;
+            cameraController.StopCamera();
+            previewImage.texture = null;
+            previewImage.enabled = false;
+            circle.gameObject.SetActive(false);
+            shutterButton.gameObject.SetActive(false);
+            cameraPlaceholder.SetKey("placeholder_camera");
+            cameraPlaceholder.gameObject.SetActive(true);
+            cameraButtonLabel.SetKey("btn_camera");
+            cameraButtonImage.color = PrimaryColor;
+            cameraColor = null;
+            UpdateComparison();
         }
 
         void OnShutterButton()
@@ -134,35 +222,27 @@ namespace ArtColorSupporter
             var captured = cameraController.Capture();
             if (captured == null)
             {
-                cameraMessage.SetKey("msg_capture_failed");
+                ShowMessage("msg_capture_failed");
                 return;
             }
 
-            CloseCamera();
             SetDisplayedTexture(captured);
             SaveCapture(captured);
         }
 
-        void CloseCamera()
-        {
-            StopAllCoroutines();
-            busy = false;
-            cameraController.StopCamera();
-            previewImage.texture = null;
-            cameraOverlay.SetActive(false);
-        }
+        // ───────────────────────── 画像の選択 ─────────────────────────
 
         void OnImageButton()
         {
-            if (busy) return;
-            busy = true;
+            if (picking) return;
+            picking = true;
             ShowMessage("msg_picking");
             GalleryPicker.PickImage(Localization.Get("picker_title"), OnImagePicked);
         }
 
         void OnImagePicked(GalleryPicker.Result result, Texture2D texture)
         {
-            busy = false;
+            picking = false;
             switch (result)
             {
                 case GalleryPicker.Result.Picked:
@@ -186,17 +266,156 @@ namespace ArtColorSupporter
             Localization.Toggle();
         }
 
-        // ───────────────────────── 画像の表示と保存 ─────────────────────────
+        // ───────────────────────── 画像の表示・減色・ターゲット ─────────────────────────
 
         void SetDisplayedTexture(Texture2D texture)
         {
-            if (currentTexture != null && currentTexture != texture) Destroy(currentTexture);
-            currentTexture = texture;
-            displayImage.texture = texture;
+            if (originalTexture != null && originalTexture != texture) Destroy(originalTexture);
+            originalTexture = texture;
+            originalPixels = texture.GetPixels32();
+            imageWidth = texture.width;
+            imageHeight = texture.height;
+
             displayImage.gameObject.SetActive(true);
             placeholder.SetActive(false);
-            UIFactory.FitTexture(displayImage.rectTransform, imageArea, texture.width, texture.height);
+            displayedPixels = originalPixels;
+            imageViewer.SetTexture(texture, true);
+
+            targetUv = null;
+            targetColor = null;
+            UpdateComparison();
+            ApplyColorMode();
         }
+
+        void OnModeButton(int index)
+        {
+            colorMode = Modes[index];
+            UpdateModeButtons();
+            ApplyColorMode();
+        }
+
+        void UpdateModeButtons()
+        {
+            for (int i = 0; i < modeButtonImages.Length; i++)
+                modeButtonImages[i].color = Modes[i] == colorMode ? PrimaryColor : NeutralColor;
+        }
+
+        void ApplyColorMode()
+        {
+            if (originalPixels == null) return;
+            reduceVersion++;
+            if (colorMode == ColorMode.Full)
+            {
+                ShowReduced(originalPixels, originalTexture);
+                return;
+            }
+            StartCoroutine(ReduceColors(reduceVersion, colorMode, originalPixels));
+        }
+
+        IEnumerator ReduceColors(int version, ColorMode mode, Color32[] source)
+        {
+            ShowMessage("msg_reducing");
+            // 大きな画像でも画面が止まらないよう別スレッドで計算する
+            var task = Task.Run(() => ColorReducer.Reduce(source, mode));
+            while (!task.IsCompleted) yield return null;
+            if (version != reduceVersion || source != originalPixels) yield break; // 途中で別の操作があった
+
+            if (task.IsFaulted)
+            {
+                Debug.LogException(task.Exception);
+                ShowMessage("msg_reduce_failed");
+                yield break;
+            }
+
+            if (reducedTexture == null || reducedTexture.width != imageWidth || reducedTexture.height != imageHeight)
+            {
+                if (reducedTexture != null) Destroy(reducedTexture);
+                reducedTexture = new Texture2D(imageWidth, imageHeight, TextureFormat.RGBA32, false) { name = "Reduced" };
+            }
+            reducedTexture.SetPixels32(task.Result);
+            reducedTexture.Apply();
+            ShowReduced(task.Result, reducedTexture);
+            ShowMessage(targetUv.HasValue ? "msg_mode_changed" : "msg_image_loaded");
+        }
+
+        void ShowReduced(Color32[] pixels, Texture2D texture)
+        {
+            displayedPixels = pixels;
+            imageViewer.SetTexture(texture, false);
+            // ターゲットは同じ場所のまま、新しい色で取り直す
+            if (targetUv.HasValue) SetTarget(targetUv.Value);
+        }
+
+        void OnImageTapped(Vector2 uv)
+        {
+            SetTarget(uv);
+            ShowMessage("msg_target_set");
+        }
+
+        void SetTarget(Vector2 uv)
+        {
+            targetUv = uv;
+            int cx = Mathf.Clamp((int)(uv.x * imageWidth), 0, imageWidth - 1);
+            int cy = Mathf.Clamp((int)(uv.y * imageHeight), 0, imageHeight - 1);
+
+            float r = 0, g = 0, b = 0;
+            int count = 0;
+            for (int y = Mathf.Max(0, cy - TargetSampleRadius); y <= Mathf.Min(imageHeight - 1, cy + TargetSampleRadius); y++)
+            {
+                for (int x = Mathf.Max(0, cx - TargetSampleRadius); x <= Mathf.Min(imageWidth - 1, cx + TargetSampleRadius); x++)
+                {
+                    var c = displayedPixels[y * imageWidth + x];
+                    r += c.r;
+                    g += c.g;
+                    b += c.b;
+                    count++;
+                }
+            }
+            var color = new Color(r / count / 255f, g / count / 255f, b / count / 255f, 1f);
+            targetColor = color;
+            imageViewer.ShowMarker(uv, ColorWheel.Invert(color));
+            UpdateComparison();
+        }
+
+        // ───────────────────────── 色の比較 ─────────────────────────
+
+        void UpdateComparison()
+        {
+            colorWheel.SetTarget(targetColor);
+            colorWheel.SetCamera(cameraColor);
+            targetSwatch.color = targetColor ?? PanelColor;
+            cameraSwatch.color = cameraColor ?? PanelColor;
+
+            if (!targetColor.HasValue)
+            {
+                SetAdvice("advice_need_target");
+                diffText.gameObject.SetActive(false);
+                return;
+            }
+            if (!cameraColor.HasValue)
+            {
+                SetAdvice("advice_need_camera");
+                diffText.gameObject.SetActive(false);
+                return;
+            }
+
+            var diff = ColorAdvice.Difference(targetColor.Value, cameraColor.Value);
+            SetAdvice(ColorAdvice.AdviceKey(diff));
+            diffText.gameObject.SetActive(true);
+            diffText.SetKey("cmyk_diff", Percent(diff.C), Percent(diff.M), Percent(diff.Y), Percent(diff.K));
+        }
+
+        void SetAdvice(string key)
+        {
+            if (adviceText.Key != key) adviceText.SetKey(key);
+        }
+
+        static int Percent(float value)
+        {
+            return Mathf.RoundToInt(value * 100f);
+        }
+
+        // ───────────────────────── 保存とメッセージ ─────────────────────────
 
         void SaveCapture(Texture2D texture)
         {
@@ -249,8 +468,7 @@ namespace ArtColorSupporter
             safeArea.gameObject.AddComponent<SafeArea>();
 
             BuildImageArea(safeArea);
-            BuildControlPanel(safeArea);
-            BuildCameraOverlay(canvas.transform);
+            BuildRightPanel(safeArea);
         }
 
         void BuildImageArea(Transform parent)
@@ -259,8 +477,11 @@ namespace ArtColorSupporter
             UIFactory.Stretch(frame.rectTransform, new Vector2(0, 0), new Vector2(0.5f, 1), 32, 16, 32, 32);
 
             imageArea = UIFactory.CreateRect("ImageArea", frame.transform);
-            UIFactory.StretchFull(imageArea, 16);
+            UIFactory.Stretch(imageArea, Vector2.zero, Vector2.one, 16, 16, 16, 16 + 96 + 16);
             imageArea.gameObject.AddComponent<RectMask2D>();
+            // タッチを受け取るための透明な面
+            var touchSurface = imageArea.gameObject.AddComponent<Image>();
+            touchSurface.color = new Color(0, 0, 0, 0);
 
             var placeholderText = UIFactory.CreateText(imageArea, "Placeholder", "placeholder_image", 40, SubTextColor,
                 TextAnchor.MiddleCenter);
@@ -271,78 +492,163 @@ namespace ArtColorSupporter
             displayImage = imageRect.gameObject.AddComponent<RawImage>();
             displayImage.raycastTarget = false;
             imageRect.gameObject.SetActive(false);
-        }
 
-        void BuildControlPanel(Transform parent)
-        {
-            var panel = UIFactory.CreateRect("ControlPanel", parent);
-            UIFactory.Stretch(panel, new Vector2(0.5f, 0), new Vector2(1, 1), 16, 32, 32, 32);
+            var marker = UIFactory.CreateRect("TargetMarker", imageArea);
+            var markerImage = marker.gameObject.AddComponent<Image>();
+            markerImage.sprite = UIFactory.CrossSprite;
+            markerImage.raycastTarget = false;
+            marker.sizeDelta = new Vector2(48, 48);
 
-            var title = UIFactory.CreateText(panel, "Title", "app_title", 56, TextColor, TextAnchor.MiddleLeft);
-            // 上端に高さ 110 で配置（右側は言語ボタンのために空ける）
-            UIFactory.Stretch((RectTransform)title.transform, new Vector2(0, 1), new Vector2(1, 1), 8, 300, 0, -110);
+            imageViewer = imageArea.gameObject.AddComponent<ImageViewer>();
+            imageViewer.Init(displayImage, marker);
+            imageViewer.Tapped += OnImageTapped;
 
-            var languageButton = UIFactory.CreateButton(panel, "LanguageButton", "btn_language", NeutralColor, TextColor,
-                40, OnLanguageButton);
-            UIFactory.Place((RectTransform)languageButton.transform, new Vector2(1, 1), new Vector2(260, 110), Vector2.zero);
-
-            var buttons = UIFactory.CreateRect("MainButtons", panel);
-            UIFactory.Stretch(buttons, new Vector2(0, 0.4f), new Vector2(1, 1), 0, 0, 150, 0);
-            var layout = buttons.gameObject.AddComponent<VerticalLayoutGroup>();
-            layout.spacing = 32;
-            layout.childAlignment = TextAnchor.MiddleCenter;
+            // 色数の切り替えボタン
+            var modeRow = UIFactory.CreateRect("ColorModeButtons", frame.transform);
+            UIFactory.Stretch(modeRow, new Vector2(0, 0), new Vector2(1, 0), 16, 16, -(16 + 96), 16);
+            var layout = modeRow.gameObject.AddComponent<HorizontalLayoutGroup>();
+            layout.spacing = 12;
             layout.childControlWidth = true;
             layout.childControlHeight = true;
             layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = true;
 
-            UIFactory.CreateButton(buttons, "CameraButton", "btn_camera", PrimaryColor, TextColor, 64,
-                OnCameraButton);
-            UIFactory.CreateButton(buttons, "ImageButton", "btn_image", SecondaryColor, TextColor, 64,
-                OnImageButton);
-
-            var messageBox = UIFactory.CreateImage(panel, "MessageBox", PanelColor, true);
-            UIFactory.Stretch(messageBox.rectTransform, new Vector2(0, 0), new Vector2(1, 0.4f), 0, 0, 32, 0);
-            messageText = UIFactory.CreateText(messageBox.transform, "Message", "", 40, TextColor, TextAnchor.MiddleLeft);
-            UIFactory.StretchFull((RectTransform)messageText.transform, 32);
+            modeButtonImages = new Image[Modes.Length];
+            for (int i = 0; i < Modes.Length; i++)
+            {
+                int index = i;
+                var button = UIFactory.CreateButton(modeRow, "Mode_" + Modes[i], ModeKeys[i], NeutralColor, TextColor, 34,
+                    () => OnModeButton(index));
+                modeButtonImages[i] = (Image)button.targetGraphic;
+            }
         }
 
-        void BuildCameraOverlay(Transform parent)
+        void BuildRightPanel(Transform parent)
         {
-            var overlay = UIFactory.CreateImage(parent, "CameraOverlay", Color.black, false);
-            UIFactory.StretchFull(overlay.rectTransform);
-            cameraOverlay = overlay.gameObject;
+            var panel = UIFactory.CreateRect("RightPanel", parent);
+            UIFactory.Stretch(panel, new Vector2(0.5f, 0), new Vector2(1, 1), 16, 32, 32, 32);
 
-            previewArea = UIFactory.CreateRect("PreviewArea", overlay.transform);
-            UIFactory.StretchFull(previewArea);
+            // 上の操作ボタン
+            var topBar = UIFactory.CreateRect("TopBar", panel);
+            UIFactory.Stretch(topBar, new Vector2(0, 1), new Vector2(1, 1), 0, 0, 0, -100);
+            var layout = topBar.gameObject.AddComponent<HorizontalLayoutGroup>();
+            layout.spacing = 16;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = true;
+
+            var cameraButton = UIFactory.CreateButton(topBar, "CameraButton", "btn_camera", PrimaryColor, TextColor, 44,
+                OnCameraButton);
+            cameraButtonImage = (Image)cameraButton.targetGraphic;
+            cameraButtonLabel = cameraButton.GetComponentInChildren<LocalizedText>();
+            UIFactory.CreateButton(topBar, "ImageButton", "btn_image", SecondaryColor, TextColor, 44, OnImageButton);
+            UIFactory.CreateButton(topBar, "LanguageButton", "btn_language", NeutralColor, TextColor, 40,
+                OnLanguageButton);
+
+            BuildWheelSection(panel);
+            BuildCameraSection(panel);
+        }
+
+        void BuildWheelSection(Transform panel)
+        {
+            wheelSection = UIFactory.CreateRect("WheelSection", panel);
+            UIFactory.Stretch(wheelSection, new Vector2(0, 0.5f), new Vector2(1, 1), 0, 0, 100 + 20, 8);
+
+            colorWheel = ColorWheel.Create(wheelSection);
+            wheelRoot = (RectTransform)colorWheel.transform;
+            wheelRoot.anchorMin = new Vector2(0, 0);
+            wheelRoot.anchorMax = new Vector2(0, 1);
+            wheelRoot.pivot = new Vector2(0, 0.5f);
+            wheelRoot.offsetMin = wheelRoot.offsetMax = Vector2.zero;
+            var fitter = wheelRoot.gameObject.AddComponent<AspectRatioFitter>();
+            fitter.aspectMode = AspectRatioFitter.AspectMode.HeightControlsWidth;
+            fitter.aspectRatio = ColorWheel.AspectRatio;
+
+            // ホイールの右: 色見本とメッセージ（左端は Update でホイールの幅に合わせる）
+            infoColumn = UIFactory.CreateRect("InfoColumn", wheelSection);
+            UIFactory.StretchFull(infoColumn);
+            var layout = infoColumn.gameObject.AddComponent<VerticalLayoutGroup>();
+            layout.spacing = 10;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
+
+            targetSwatch = CreateSwatchRow(infoColumn, "TargetRow", "label_target", UIFactory.CrossSprite);
+            cameraSwatch = CreateSwatchRow(infoColumn, "CameraRow", "label_camera", UIFactory.RingSprite);
+
+            adviceText = CreateInfoText(infoColumn, "Advice", 32, TextColor, 80, 0);
+            diffText = CreateInfoText(infoColumn, "CmykDiff", 24, SubTextColor, 34, 0);
+            messageText = CreateInfoText(infoColumn, "Message", 26, SubTextColor, 60, 1);
+        }
+
+        Image CreateSwatchRow(Transform parent, string name, string labelKey, Sprite markSprite)
+        {
+            var row = UIFactory.CreateRect(name, parent);
+            row.gameObject.AddComponent<LayoutElement>().preferredHeight = 56;
+
+            var swatch = UIFactory.CreateImage(row, "Swatch", PanelColor, true);
+            UIFactory.Place(swatch.rectTransform, new Vector2(0, 0.5f), new Vector2(96, 56), Vector2.zero);
+
+            var mark = UIFactory.CreateRect("Mark", row).gameObject.AddComponent<Image>();
+            mark.sprite = markSprite;
+            mark.color = SubTextColor;
+            mark.raycastTarget = false;
+            UIFactory.Place(mark.rectTransform, new Vector2(0, 0.5f), new Vector2(40, 40), new Vector2(110, 0));
+
+            var label = UIFactory.CreateText(row, "Label", labelKey, 30, TextColor, TextAnchor.MiddleLeft);
+            UIFactory.Stretch((RectTransform)label.transform, Vector2.zero, Vector2.one, 160, 0, 0, 0);
+            return swatch;
+        }
+
+        static LocalizedText CreateInfoText(Transform parent, string name, int fontSize, Color color, float height,
+            float flexibleHeight)
+        {
+            var text = UIFactory.CreateText(parent, name, "", fontSize, color, TextAnchor.UpperLeft);
+            var element = text.gameObject.AddComponent<LayoutElement>();
+            element.minHeight = height;
+            element.preferredHeight = height;
+            element.flexibleHeight = flexibleHeight;
+            return text;
+        }
+
+        void BuildCameraSection(Transform panel)
+        {
+            var section = UIFactory.CreateImage(panel, "CameraSection", Color.black, true);
+            UIFactory.Stretch(section.rectTransform, new Vector2(0, 0), new Vector2(1, 0.5f), 0, 0, 8, 0);
+
+            previewArea = UIFactory.CreateRect("PreviewArea", section.transform);
+            UIFactory.StretchFull(previewArea, 8);
+            previewArea.gameObject.AddComponent<RectMask2D>();
+
             var previewRect = UIFactory.CreateRect("Preview", previewArea);
             previewImage = previewRect.gameObject.AddComponent<RawImage>();
             previewImage.raycastTarget = false;
+            previewImage.enabled = false;
 
-            var controls = UIFactory.CreateRect("OverlaySafeArea", overlay.transform);
-            controls.gameObject.AddComponent<SafeArea>();
+            var circleImage = UIFactory.CreateRect("Circle", previewArea).gameObject.AddComponent<Image>();
+            circleImage.sprite = UIFactory.OutlinedRingSprite;
+            circleImage.raycastTarget = false;
+            circle = circleImage.rectTransform;
+            UIFactory.Place(circle, new Vector2(0.5f, 0.5f), new Vector2(200, 200), Vector2.zero);
+            circle.gameObject.SetActive(false);
 
-            shutterButton = UIFactory.CreateButton(controls, "ShutterButton", "btn_shutter", ShutterColor, DarkTextColor,
-                52, OnShutterButton);
-            UIFactory.Place((RectTransform)shutterButton.transform, new Vector2(1, 0.5f), new Vector2(240, 240),
-                new Vector2(-40, 0));
+            cameraPlaceholder = UIFactory.CreateText(previewArea, "Placeholder", "placeholder_camera", 34, SubTextColor,
+                TextAnchor.MiddleCenter);
+            UIFactory.StretchFull((RectTransform)cameraPlaceholder.transform, 24);
 
-            var closeButton = UIFactory.CreateButton(controls, "CloseButton", "btn_close", NeutralColor, TextColor, 40,
-                CloseCamera);
-            UIFactory.Place((RectTransform)closeButton.transform, new Vector2(0, 1), new Vector2(240, 110),
-                new Vector2(40, -40));
-
-            var hintBox = UIFactory.CreateImage(controls, "HintBox", new Color(0, 0, 0, 0.55f), true);
-            UIFactory.Place(hintBox.rectTransform, new Vector2(0.5f, 0), new Vector2(1100, 110), new Vector2(0, 40));
-            cameraMessage = UIFactory.CreateText(hintBox.transform, "Hint", "", 38, TextColor, TextAnchor.MiddleCenter);
-            UIFactory.StretchFull((RectTransform)cameraMessage.transform, 16);
-
-            cameraOverlay.SetActive(false);
+            shutterButton = UIFactory.CreateButton(section.transform, "ShutterButton", "btn_shutter", ShutterColor,
+                DarkTextColor, 34, OnShutterButton);
+            UIFactory.Place((RectTransform)shutterButton.transform, new Vector2(1, 0), new Vector2(170, 80),
+                new Vector2(-20, 20));
+            shutterButton.gameObject.SetActive(false);
         }
 
         void OnDestroy()
         {
-            if (currentTexture != null) Destroy(currentTexture);
+            if (originalTexture != null) Destroy(originalTexture);
+            if (reducedTexture != null) Destroy(reducedTexture);
         }
     }
 }

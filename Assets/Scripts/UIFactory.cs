@@ -9,6 +9,9 @@ namespace ArtColorSupporter
     {
         static Font font;
         static Sprite roundedSprite;
+        static Sprite crossSprite;
+        static Sprite ringSprite;
+        static Sprite outlinedRingSprite;
 
         public static Font DefaultFont
         {
@@ -26,6 +29,36 @@ namespace ArtColorSupporter
             {
                 if (roundedSprite == null) roundedSprite = CreateRoundedSprite(64, 20);
                 return roundedSprite;
+            }
+        }
+
+        /// <summary>✕ 印（白、Image.color で色を付ける）。</summary>
+        public static Sprite CrossSprite
+        {
+            get
+            {
+                if (crossSprite == null) crossSprite = CreateMarkSprite(64, "Cross", CrossShape);
+                return crossSprite;
+            }
+        }
+
+        /// <summary>○ 印（白、Image.color で色を付ける）。</summary>
+        public static Sprite RingSprite
+        {
+            get
+            {
+                if (ringSprite == null) ringSprite = CreateMarkSprite(64, "Ring", RingShape);
+                return ringSprite;
+            }
+        }
+
+        /// <summary>外側と内側に薄い黒の縁がある白い円（明るい背景でも見えるように）。</summary>
+        public static Sprite OutlinedRingSprite
+        {
+            get
+            {
+                if (outlinedRingSprite == null) outlinedRingSprite = CreateOutlinedRingSprite(256);
+                return outlinedRingSprite;
             }
         }
 
@@ -140,6 +173,79 @@ namespace ArtColorSupporter
             {
                 return null;
             }
+        }
+
+        delegate float Shape(float x, float y);
+
+        /// <summary>中心 (0,0)、半径 1 の座標で形の濃さ（0〜1）を返す関数からスプライトを作る。</summary>
+        static Sprite CreateMarkSprite(int size, string name, Shape shape)
+        {
+            var texture = new Texture2D(size, size, TextureFormat.RGBA32, false)
+            {
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+                name = name,
+            };
+            var pixels = new Color32[size * size];
+            float half = size / 2f;
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    float alpha = shape((x + 0.5f - half) / half, (y + 0.5f - half) / half);
+                    pixels[y * size + x] = new Color32(255, 255, 255, (byte)(Mathf.Clamp01(alpha) * 255));
+                }
+            }
+            texture.SetPixels32(pixels);
+            texture.Apply();
+            return Sprite.Create(texture, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
+        }
+
+        static float CrossShape(float x, float y)
+        {
+            const float halfThickness = 0.13f, extent = 0.8f, pixel = 1f / 32f;
+            float distance = Mathf.Min(Mathf.Abs(x - y), Mathf.Abs(x + y)) * 0.7071f;
+            float inside = Mathf.Clamp01((halfThickness - distance) / pixel + 0.5f);
+            float end = Mathf.Clamp01((extent - Mathf.Max(Mathf.Abs(x), Mathf.Abs(y))) / pixel + 0.5f);
+            return inside * end;
+        }
+
+        static float RingShape(float x, float y)
+        {
+            const float radius = 0.72f, halfThickness = 0.12f, pixel = 1f / 32f;
+            float distance = Mathf.Abs(Mathf.Sqrt(x * x + y * y) - radius);
+            return Mathf.Clamp01((halfThickness - distance) / pixel + 0.5f);
+        }
+
+        static Sprite CreateOutlinedRingSprite(int size)
+        {
+            var texture = new Texture2D(size, size, TextureFormat.RGBA32, false)
+            {
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+                name = "OutlinedRing",
+            };
+            var pixels = new Color32[size * size];
+            float half = size / 2f;
+            const float white = 0.035f, outline = 0.012f;
+            float pixel = 1f / half;
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    float dx = (x + 0.5f - half) / half, dy = (y + 0.5f - half) / half;
+                    float distance = Mathf.Abs(Mathf.Sqrt(dx * dx + dy * dy) - (1f - white - outline * 2f));
+                    float whiteAlpha = Mathf.Clamp01((white - distance) / pixel + 0.5f);
+                    float shapeAlpha = Mathf.Clamp01((white + outline - distance) / pixel + 0.5f);
+                    // 白い輪の外側を半透明の黒で縁取る
+                    float alpha = Mathf.Max(whiteAlpha, shapeAlpha * 0.6f);
+                    byte gray = (byte)(whiteAlpha >= 0.999f ? 255 : 255 * whiteAlpha / Mathf.Max(alpha, 0.001f));
+                    pixels[y * size + x] = new Color32(gray, gray, gray, (byte)(alpha * 255));
+                }
+            }
+            texture.SetPixels32(pixels);
+            texture.Apply();
+            return Sprite.Create(texture, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f));
         }
 
         static Sprite CreateRoundedSprite(int size, int radius)
