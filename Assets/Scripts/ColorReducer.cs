@@ -35,11 +35,70 @@ namespace ArtColorSupporter
             }
         }
 
-        public static Color32[] Reduce(Color32[] source, ColorMode mode)
+        /// <summary>
+        /// 色数に合わせて画素も粗くするときの長辺のピクセル数（0 なら元のまま）。
+        /// 色が少ないほど粗くして、簡単な絵のように見せる。
+        /// </summary>
+        public static int PixelLongSide(ColorMode mode)
         {
+            switch (mode)
+            {
+                case ColorMode.Colors256: return 320;
+                case ColorMode.Colors16: return 160;
+                case ColorMode.Colors8: return 96;
+                default: return 0;
+            }
+        }
+
+        /// <summary>減色した画素の配列と、その幅・高さを返す。</summary>
+        public static Color32[] Reduce(Color32[] source, int width, int height, ColorMode mode,
+            out int outWidth, out int outHeight)
+        {
+            outWidth = width;
+            outHeight = height;
             if (mode == ColorMode.Full) return source;
             if (mode == ColorMode.Mono) return ToGrayscale(source);
-            return Quantize(source, ColorCount(mode));
+
+            var pixels = Downscale(source, width, height, PixelLongSide(mode), out outWidth, out outHeight);
+            return Quantize(pixels, ColorCount(mode));
+        }
+
+        /// <summary>長辺が longSide になるよう、ブロックごとの平均色で縮小する（元より大きくはしない）。</summary>
+        public static Color32[] Downscale(Color32[] source, int width, int height, int longSide,
+            out int outWidth, out int outHeight)
+        {
+            outWidth = width;
+            outHeight = height;
+            if (longSide <= 0 || Math.Max(width, height) <= longSide) return source;
+
+            float scale = (float)longSide / Math.Max(width, height);
+            outWidth = Math.Max(1, (int)Math.Round(width * scale));
+            outHeight = Math.Max(1, (int)Math.Round(height * scale));
+
+            var result = new Color32[outWidth * outHeight];
+            for (int y = 0; y < outHeight; y++)
+            {
+                int y0 = y * height / outHeight, y1 = Math.Max(y0 + 1, (y + 1) * height / outHeight);
+                for (int x = 0; x < outWidth; x++)
+                {
+                    int x0 = x * width / outWidth, x1 = Math.Max(x0 + 1, (x + 1) * width / outWidth);
+                    long r = 0, g = 0, b = 0;
+                    for (int sy = y0; sy < y1; sy++)
+                    {
+                        int row = sy * width;
+                        for (int sx = x0; sx < x1; sx++)
+                        {
+                            var c = source[row + sx];
+                            r += c.r;
+                            g += c.g;
+                            b += c.b;
+                        }
+                    }
+                    int count = (y1 - y0) * (x1 - x0);
+                    result[y * outWidth + x] = new Color32((byte)(r / count), (byte)(g / count), (byte)(b / count), 255);
+                }
+            }
+            return result;
         }
 
         static Color32[] ToGrayscale(Color32[] source)
