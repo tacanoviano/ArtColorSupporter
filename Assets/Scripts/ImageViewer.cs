@@ -108,8 +108,8 @@ namespace ArtColorSupporter
 
         static bool IsPrimary(PointerEventData eventData)
         {
-            // タッチは pointerId >= 0、マウスは左ボタンのみ
-            return eventData.pointerId >= 0 || eventData.button == PointerEventData.InputButton.Left;
+            // タッチは左ボタン扱いで届くので、マウスの右・中ボタンだけ除く
+            return eventData.button == PointerEventData.InputButton.Left;
         }
 
         public void OnPointerDown(PointerEventData eventData)
@@ -186,7 +186,9 @@ namespace ArtColorSupporter
 
         public void OnScroll(PointerEventData eventData)
         {
-            ZoomAround(ToLocal(eventData.position), Mathf.Pow(1.15f, eventData.scrollDelta.y));
+            // ホイール量の単位は入力方式によって違うので、向きだけを使う
+            float direction = Mathf.Sign(eventData.scrollDelta.y);
+            if (eventData.scrollDelta.y != 0) ZoomAround(ToLocal(eventData.position), Mathf.Pow(1.15f, direction));
         }
 
         void OnDisable()
