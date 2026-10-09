@@ -55,6 +55,18 @@
   足りない色がなく濃すぎるときは「白で明るく」と表示する。下の小さな数字は各インクの不足量。
 - **画像**: 端末の写真から選んで左に表示（長辺 2048px まで縮小して読み込む）。
 
+## Input System の導入（入力の新しい仕組み）
+
+古い Input Manager は将来なくなる予定なので、新しい Input System パッケージを使う。
+
+1. **Window > Package Manager** を開き、左の **Unity Registry** から **Input System** を選んで Install。
+2. 「新しい入力の仕組みを有効にするか（enable the new backends）」と聞かれたら **Yes**。Unity が再起動する。
+3. 再起動後、Player Settings > Other Settings > **Active Input Handling** が
+   「Input System Package (New)」になっていることを確認する。
+
+入れると自動的に `INPUT_SYSTEM_PACKAGE` が有効になり、タッチ操作や戻るボタンが新しい仕組みで動く。
+入れていなくても古い Input Manager でそのまま動く。
+
 ## 日本語/英語対応のルール（今後の追加分も含む）
 
 UI の文字はすべて `Assets/Scripts/Localization.cs` の `Table` に `{ キー, { 日本語, English } }` で登録し、
@@ -78,5 +90,7 @@ UI の文字はすべて `Assets/Scripts/Localization.cs` の `Table` に `{ キ
 
 ## うまく動かないとき
 
-- ボタンが反応しない: Player Settings > Other Settings > **Active Input Handling** を「Input Manager (Old)」か「Both」にする。
+- 「This project uses Input Manager, which is marked for deprecation」と出る: 下の「Input System の導入」をする。
+- ボタンが反応しない: Player Settings > Other Settings > **Active Input Handling** を確認する。
+  Input System を入れたなら「Input System Package (New)」、入れていないなら「Input Manager (Old)」にする。
 - 日本語が表示されない（エディタ）: OS に日本語フォントがあれば表示される。実機では端末のフォントが使われる。

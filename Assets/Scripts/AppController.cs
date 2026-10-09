@@ -5,6 +5,10 @@ using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
+#if ENABLE_INPUT_SYSTEM && INPUT_SYSTEM_PACKAGE
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.UI;
+#endif
 
 namespace ArtColorSupporter
 {
@@ -140,8 +144,10 @@ namespace ArtColorSupporter
             }
             shutterButton.interactable = cameraController.IsReady;
 
-#if ENABLE_LEGACY_INPUT_MANAGER
-            // Android の戻るボタンでカメラを止める
+            // Android の戻るボタン（Esc キーとして届く）でカメラを止める
+#if ENABLE_INPUT_SYSTEM && INPUT_SYSTEM_PACKAGE
+            if (Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame) StopCamera();
+#elif ENABLE_LEGACY_INPUT_MANAGER
             if (Input.GetKeyDown(KeyCode.Escape)) StopCamera();
 #endif
         }
@@ -467,7 +473,15 @@ namespace ArtColorSupporter
         void BuildUI()
         {
             if (FindAnyObjectByType<EventSystem>() == null)
-                new GameObject("EventSystem", typeof(EventSystem), typeof(StandaloneInputModule));
+            {
+                var eventSystem = new GameObject("EventSystem", typeof(EventSystem));
+                // 新しい Input System があればそれを使い、なければ古い Input Manager を使う
+#if ENABLE_INPUT_SYSTEM && INPUT_SYSTEM_PACKAGE
+                eventSystem.AddComponent<InputSystemUIInputModule>();
+#else
+                eventSystem.AddComponent<StandaloneInputModule>();
+#endif
+            }
 
             var canvasObject = new GameObject("Canvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
             canvasObject.transform.SetParent(transform, false);
