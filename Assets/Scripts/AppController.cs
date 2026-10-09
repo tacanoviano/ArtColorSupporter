@@ -34,7 +34,10 @@ namespace ArtColorSupporter
         const float CircleRatio = 0.24f;
         /// <summary>円の画像のうち、平均を取る内側の半径の割合（白い縁を除く）。</summary>
         const float CircleInnerRatio = 0.88f;
-        /// <summary>ターゲット色はタップした点の周り (2×半径+1) 四方の平均。</summary>
+        /// <summary>
+        /// ターゲット色はタップした点の周り (2×半径+1) 四方の平均。
+        /// 画素を粗くした画像では 1 画素がそのまま 1 色なので、タップした画素の色だけを使う。
+        /// </summary>
         const int TargetSampleRadius = 2;
 
         // 左半分: 画像
@@ -49,6 +52,7 @@ namespace ArtColorSupporter
         Texture2D reducedTexture;
         Color32[] displayedPixels;
         int imageWidth, imageHeight;
+        int displayedWidth, displayedHeight;
         ColorMode colorMode = ColorMode.Full;
         int reduceVersion;
 
@@ -279,6 +283,8 @@ namespace ArtColorSupporter
             displayImage.gameObject.SetActive(true);
             placeholder.SetActive(false);
             displayedPixels = originalPixels;
+            displayedWidth = imageWidth;
+            displayedHeight = imageHeight;
             imageViewer.SetTexture(texture, true);
 
             targetUv = null;
@@ -306,7 +312,7 @@ namespace ArtColorSupporter
             reduceVersion++;
             if (colorMode == ColorMode.Full)
             {
-                ShowReduced(originalPixels, originalTexture);
+                ShowReduced(originalPixels, imageWidth, imageHeight, originalTexture);
                 return;
             }
             StartCoroutine(ReduceColors(reduceVersion, colorMode, originalPixels));
@@ -316,7 +322,9 @@ namespace ArtColorSupporter
         {
             ShowMessage("msg_reducing");
             // 大きな画像でも画面が止まらないよう別スレッドで計算する
-            var task = Task.Run(() => ColorReducer.Reduce(source, mode));
+            int sourceWidth = imageWidth, sourceHeight = imageHeight;
+            int width = 0, height = 0;
+            var task = Task.Run(() => ColorReducer.Reduce(source, sourceWidth, sourceHeight, mode, out width, out height));
             while (!task.IsCompleted) yield return null;
             if (version != reduceVersion || source != originalPixels) yield break; // 途中で別の操作があった
 
@@ -327,20 +335,28 @@ namespace ArtColorSupporter
                 yield break;
             }
 
-            if (reducedTexture == null || reducedTexture.width != imageWidth || reducedTexture.height != imageHeight)
+            if (reducedTexture == null || reducedTexture.width != width || reducedTexture.height != height)
             {
                 if (reducedTexture != null) Destroy(reducedTexture);
-                reducedTexture = new Texture2D(imageWidth, imageHeight, TextureFormat.RGBA32, false) { name = "Reduced" };
+                // 粗くした画素がぼやけず、四角いまま拡大されるようにする
+                reducedTexture = new Texture2D(width, height, TextureFormat.RGBA32, false)
+                {
+                    name = "Reduced",
+                    filterMode = FilterMode.Point,
+                    wrapMode = TextureWrapMode.Clamp,
+                };
             }
             reducedTexture.SetPixels32(task.Result);
             reducedTexture.Apply();
-            ShowReduced(task.Result, reducedTexture);
+            ShowReduced(task.Result, width, height, reducedTexture);
             ShowMessage(targetUv.HasValue ? "msg_mode_changed" : "msg_image_loaded");
         }
 
-        void ShowReduced(Color32[] pixels, Texture2D texture)
+        void ShowReduced(Color32[] pixels, int width, int height, Texture2D texture)
         {
             displayedPixels = pixels;
+            displayedWidth = width;
+            displayedHeight = height;
             imageViewer.SetTexture(texture, false);
             // ターゲットは同じ場所のまま、新しい色で取り直す
             if (targetUv.HasValue) SetTarget(targetUv.Value);
@@ -355,16 +371,18 @@ namespace ArtColorSupporter
         void SetTarget(Vector2 uv)
         {
             targetUv = uv;
-            int cx = Mathf.Clamp((int)(uv.x * imageWidth), 0, imageWidth - 1);
-            int cy = Mathf.Clamp((int)(uv.y * imageHeight), 0, imageHeight - 1);
+            int w = displayedWidth, h = displayedHeight;
+            int cx = Mathf.Clamp((int)(uv.x * w), 0, w - 1);
+            int cy = Mathf.Clamp((int)(uv.y * h), 0, h - 1);
+            int radius = w < imageWidth ? 0 : TargetSampleRadius;
 
             float r = 0, g = 0, b = 0;
             int count = 0;
-            for (int y = Mathf.Max(0, cy - TargetSampleRadius); y <= Mathf.Min(imageHeight - 1, cy + TargetSampleRadius); y++)
+            for (int y = Mathf.Max(0, cy - radius); y <= Mathf.Min(h - 1, cy + radius); y++)
             {
-                for (int x = Mathf.Max(0, cx - TargetSampleRadius); x <= Mathf.Min(imageWidth - 1, cx + TargetSampleRadius); x++)
+                for (int x = Mathf.Max(0, cx - radius); x <= Mathf.Min(w - 1, cx + radius); x++)
                 {
-                    var c = displayedPixels[y * imageWidth + x];
+                    var c = displayedPixels[y * w + x];
                     r += c.r;
                     g += c.g;
                     b += c.b;
